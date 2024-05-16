@@ -32,18 +32,20 @@ struct _tpm_header_test {
     char data[0]; // 柔性数组，用于存储实际的数据
 };
 
-struct virtio_tpm_info;
+//struct virtio_tpm_info;
 /* device private data (one per device) */
-struct virtio_tpm_dev {
-    struct virtqueue *vq;
-    struct _tpm_header_test *header;
-    struct virtio_tpm_info *priv;
-    struct tpm_chip chip;
-};
+// struct virtio_tpm_dev {
+    
+//     struct _tpm_header_test *header;
+//     struct virtio_tpm_info *priv;
+    
+// };
 
 struct virtio_tpm_info{
-    struct tpm_chip *chip;
-    struct virtio_tpm_dev *vtdev;
+    //struct tpm_chip *chip;
+    struct tpm_chip chip;
+    struct virtqueue *vq;
+    //struct virtio_tpm_dev *vtdev;
     u32 version;
     uint8_t response[512];
     size_t response_len;
@@ -53,7 +55,7 @@ struct virtio_tpm_info{
 /* 发送命令的函数 */
 static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
 {
-    struct virtio_tpm_dev *dev = vti->vtdev;
+    //struct virtio_tpm_dev *dev = vti->vtdev;
     //struct virtio_tpm_info *vi= vdev->priv;
     struct scatterlist sg1,sg2,*sgs[2]; // 
     char *request_buffer;
@@ -80,13 +82,13 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
 
     /* Add request_buffer to the virtqueue */
 
-    if (virtqueue_add_sgs(dev->vq, sgs, 1, 1, vti, GFP_ATOMIC)) {
+    if (virtqueue_add_sgs(vti->vq, sgs, 1, 1, vti, GFP_ATOMIC)) {
         kfree(request_buffer);
         return ENODEV;
     }
 
     /* Kick the virtqueue to send the data */
-    virtqueue_kick(dev->vq);
+    virtqueue_kick(vti->vq);
 
     return 0;
 }
@@ -106,6 +108,7 @@ static int virtio_tpm_send(struct tpm_chip *chip, u8  *buf, size_t buflen)
        printk(KERN_INFO "%02x", buf[i]);
     }
     printk(KERN_INFO "\n");
+    printk(KERN_INFO "virtio_tpm_probe: vi structure address3: %px\n", &(*vti));
 
     rc= send_command(vti,buf,buflen);
     return rc;
@@ -244,14 +247,15 @@ static const struct tpm_class_ops virtio_tpm = {
 
 
 
-static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_info vti){
+static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_info *vti){
     struct device dev = vdev->dev;
     struct tpm_chip *chip;
     int rc;
 
 
     chip =   tpmm_chip_alloc(&dev,&virtio_tpm);
-    dev_set_drvdata(&chip->dev,&vti);
+    printk(KERN_INFO "virtio_tpm_probe: vi structure address2: %px\n", &vti);
+    dev_set_drvdata(&chip->dev,vti);
 
 
 
@@ -268,45 +272,46 @@ static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_in
 
 static int virtio_tpm_probe(struct virtio_device *vdev)
 {
-    struct virtio_tpm_dev *dev = NULL;
+    //struct virtio_tpm_dev *dev = NULL;
     struct virtio_tpm_info * vi; 
     //struct _tpm_header_test *hello_cmd;
     
     
 
     /* initialize device data */
-    dev = kzalloc(sizeof(struct virtio_tpm_dev), GFP_ATOMIC);
-    if (!dev)
-        return -ENOMEM;
+    //dev = kzalloc(sizeof(struct virtio_tpm_dev), GFP_ATOMIC);
+    //if (!dev)
+    //    return -ENOMEM;
     vi = kzalloc(sizeof(struct virtio_tpm_info), GFP_ATOMIC);
-    if (!dev)
+    if (!vi)
         return -ENOMEM;
     
     
-    dev->priv = vi;
-    vi->vtdev = dev;
+    vdev->priv = vi;
+    //vi->vtdev = dev;
     vi->response_len = TPM_RESPONSE_LEN;    
     /* the device has a single virtqueue */
-    dev->vq = virtio_find_single_vq(vdev, virtio_tpm_recv_cb, "input");
-    if (IS_ERR(dev->vq)) {
-        kfree(dev);
-        return PTR_ERR(dev->vq);
+    vi->vq = virtio_find_single_vq(vdev, virtio_tpm_recv_cb, "input");
+    if (IS_ERR(vi->vq)) {
+        kfree(vi);
+        return PTR_ERR(vi->vq);
     }
-    vdev->priv = dev;
 
     /* from this point on, the device can notify and get callbacks */
     virtio_device_ready(vdev);
+    printk(KERN_INFO "virtio_tpm_probe: vi structure address1: %px\n", &(*vi));
 
-    virtio_tpm_core_init(vdev,*vi);    
+    virtio_tpm_core_init(vdev,vi);    
 
     /* Send a "hello" message to the backend device */
-    //send_command(vdev, "hello");
+    char message[] = "hello";
+    send_command(vi, message,strlen(message));
     return 0;
 }
 
 static void virtio_tpm_remove(struct virtio_device *vdev)
 {
-    struct virtio_tpm_dev *dev = vdev->priv;
+    struct virtio_tpm_info *vti = vdev->priv;
     char *buf;
 
     /*
@@ -316,14 +321,14 @@ static void virtio_tpm_remove(struct virtio_device *vdev)
     virtio_reset_device(vdev);
 
     /* detach unused request_buffer */
-    while ((buf = virtqueue_detach_unused_buf(dev->vq)) != NULL) {
+    while ((buf = virtqueue_detach_unused_buf(vti->vq)) != NULL) {
         kfree(buf);
     }
 
     /* remove virtqueues */
     vdev->config->del_vqs(vdev);
 
-    kfree(dev);
+    kfree(vti);
 }
 
 static const struct virtio_device_id id_table[] = {
