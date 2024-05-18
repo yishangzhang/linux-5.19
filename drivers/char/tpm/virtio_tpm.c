@@ -8,8 +8,9 @@
 
 #define VIRTIO_ID_TPM 41
 
-#define TPM_RESPONSE_LEN 512
+#define TPM_RESPONSE_LEN 256
 
+#define VIRTIO_TPM_TIMEOUTS (120000) // 2 miutes
 
 //copy from tpm_tis_core.h:31
 enum virtio_tpm_status {
@@ -47,8 +48,10 @@ struct virtio_tpm_info{
     struct virtqueue *vq;
     //struct virtio_tpm_dev *vtdev;
     u32 version;
-    uint8_t response[512];
+    uint8_t response[TPM_RESPONSE_LEN];
     size_t response_len;
+    u8 status;
+    struct completion     cmd_done;
 };
 
 
@@ -60,6 +63,7 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
     struct scatterlist sg1,sg2,*sgs[2]; // 
     char *request_buffer;
     unsigned int request_len= len;
+    int rc;
 
     /* Allocate request_buffer for the strings */
     request_buffer = kmalloc(request_len, GFP_ATOMIC);
@@ -69,6 +73,9 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
         return ENODEV;
     }
 
+    vti->status &= ~TPM_STS_VALID;
+    vti->response_len =  TPM_RESPONSE_LEN;
+    init_completion(&vti->cmd_done);
     /* Copy strings to the request_buffer */
     memcpy(request_buffer, str1, request_len);
     //memcpy(request_buffer[1], str2, strlen(str2));
@@ -90,6 +97,14 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
     /* Kick the virtqueue to send the data */
     virtqueue_kick(vti->vq);
 
+    if (!wait_for_completion_io_timeout(&vti->cmd_done,
+		msecs_to_jiffies(VIRTIO_TPM_TIMEOUTS))) {
+		rc = -ETIMEDOUT;
+		return rc;
+	}
+    vti->status |= TPM_STS_VALID;
+    printk(KERN_INFO "virtio_tpm: success read message\n");
+
     return 0;
 }
 
@@ -103,12 +118,12 @@ static int virtio_tpm_send(struct tpm_chip *chip, u8  *buf, size_t buflen)
     struct virtio_tpm_info *vti = dev_get_drvdata(&chip->dev);
 
 
-    printk(KERN_INFO "\nMessage content: ");
-    for (size_t i = 0; i < buflen; ++i) {
-       printk(KERN_INFO "%02x", buf[i]);
-    }
-    printk(KERN_INFO "\n");
-    printk(KERN_INFO "virtio_tpm_probe: vi structure address3: %px\n", &(*vti));
+    // printk(KERN_INFO "\nMessage content: ");
+    // for (size_t i = 0; i < buflen; ++i) {
+    //    printk(KERN_INFO "%02x", buf[i]);
+    // }
+    // printk(KERN_INFO "\n");
+    
 
     rc= send_command(vti,buf,buflen);
     return rc;
@@ -118,6 +133,26 @@ static int virtio_tpm_recv(struct tpm_chip *chip, u8 *buf, size_t buflen)
 {
     /* 使用Virtio TPM设备的virtqueue接收数据 */
     /* ... */
+    struct virtio_tpm_info *vti = dev_get_drvdata(&chip->dev);
+    struct tpm_header *out;
+    //buflen  may be a quote?
+    if (buflen < vti->response_len){
+        printk(KERN_ERR "virtio_tpm_recv buflen is too small");
+    }
+    
+    out = (struct tpm_header *)buf;
+    printk(KERN_INFO "tpm message- tag %04x",out->tag);
+
+    printk(KERN_INFO "tpm message- len %08x",out->length);
+    printk(KERN_INFO "tpm message- len %08x",out->return_code);
+    memcpy(buf,vti->response, out->length);
+    vti->status |= TPM_STS_VALID;
+
+
+
+
+
+    
     return 0;
 }
 
@@ -133,8 +168,9 @@ static u8 virtio_tpm_status(struct tpm_chip *chip)
     /* 从Virtio TPM设备读取状态信息 */
     /* 例如，可以通过读取特定的寄存器或使用Virtio的控制接口来获取状态 */
     /* ... */
+    struct virtio_tpm_info *vti = dev_get_drvdata(&chip->dev);
 
-    return 0;
+    return vti->status;
 }
 
 static void virtio_tpm_ready(struct tpm_chip *chip)
@@ -204,23 +240,30 @@ static void virtio_tpm_clkrun_enable(struct tpm_chip *chip, bool value)
 
 static void virtio_tpm_recv_cb(struct virtqueue *vq)
 {
-    struct virtio_tpm_info *vi = vq->vdev->priv;
+    struct virtio_tpm_info *vti = vq->vdev->priv;
    // uint8_t *buf;
     unsigned int len;
-    uint8_t numss[] = {0x80, 0x81, 0x82, 0x83, 0x84};
+    // uint8_t numss[] = {0x80, 0x81, 0x82, 0x83, 0x84};
 
     while ((virtqueue_get_buf(vq, &len)) != NULL) {
         /* process the received data */
         // Process TPM commands and responses
         // You need to implement the actual TPM command processing here
+        printk(KERN_INFO "---------------------------------------------------");
+        printk(KERN_INFO "response len is %d",len);
+
+        vti->response_len = len;
         for (size_t i = 0; i < len; i++) {
-            printk(KERN_INFO "my_module: buf[%zu] = 0x%X\n", i,vi->response[i]);
+            printk(KERN_INFO "my_module: buf[%zu] = 0x%X\n", i,vti->response[i]);
         }
         printk(KERN_INFO "---------------------------------------------------");
-        for (size_t i = 0; i < sizeof(numss); i++) {
-            printk(KERN_INFO "my_module: numss[%zu] = 0x%X\n", i, numss[i]);
-        }
+        // for (size_t i = 0; i < sizeof(numss); i++) {
+        //     printk(KERN_INFO "my_module: numss[%zu] = 0x%X\n", i, numss[i]);
+        // }
     }
+
+    complete(&vti->cmd_done);
+    printk(KERN_INFO "virtio_tpm recv handle");
 }
 
 
@@ -252,9 +295,8 @@ static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_in
     struct tpm_chip *chip;
     int rc;
 
-
+    vti->status = TPM_STS_DATA_AVAIL;
     chip =   tpmm_chip_alloc(&dev,&virtio_tpm);
-    printk(KERN_INFO "virtio_tpm_probe: vi structure address2: %px\n", &vti);
     dev_set_drvdata(&chip->dev,vti);
 
 
@@ -299,13 +341,12 @@ static int virtio_tpm_probe(struct virtio_device *vdev)
 
     /* from this point on, the device can notify and get callbacks */
     virtio_device_ready(vdev);
-    printk(KERN_INFO "virtio_tpm_probe: vi structure address1: %px\n", &(*vi));
 
     virtio_tpm_core_init(vdev,vi);    
 
     /* Send a "hello" message to the backend device */
-    char message[] = "hello";
-    send_command(vi, message,strlen(message));
+    //char message[] = "hello";
+    //send_command(vi, message,strlen(message));
     return 0;
 }
 
