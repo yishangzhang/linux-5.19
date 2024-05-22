@@ -563,15 +563,17 @@ int tpm_chip_register(struct tpm_chip *chip)
 		return rc;
 	rc = tpm_auto_startup(chip);
 	if (rc) {
+		printk(KERN_INFO "tpm_auto_startup");
 		tpm_chip_stop(chip);
 		return rc;
 	}
 
 	rc = tpm_get_pcr_allocation(chip);
 	tpm_chip_stop(chip);
-	if (rc)
-		return rc;
-
+	if (rc){
+		printk(KERN_INFO "tpm_add_hwrng");
+				return rc;
+	}
 	tpm_sysfs_add_device(chip);
 
 	tpm_bios_log_setup(chip);
@@ -579,15 +581,18 @@ int tpm_chip_register(struct tpm_chip *chip)
 	tpm_add_ppi(chip);
 
 	rc = tpm_add_hwrng(chip);
-	if (rc)
+	if (rc){
+		printk(KERN_INFO "tpm_add_hwrng");
 		goto out_ppi;
-
+	}
 	rc = tpm_add_char_device(chip);
-	if (rc)
+	if (rc){
+		printk(KERN_INFO "tpm_add_char_device");
 		goto out_hwrng;
-
+	}
 	rc = tpm_add_legacy_sysfs(chip);
 	if (rc) {
+		printk(KERN_INFO "tpm_add_legacy_sysfs");
 		tpm_chip_unregister(chip);
 		return rc;
 	}

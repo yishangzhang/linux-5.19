@@ -8,7 +8,7 @@
 
 #define VIRTIO_ID_TPM 41
 
-#define TPM_RESPONSE_LEN 256
+#define TPM_RESPONSE_LEN 512
 
 #define VIRTIO_TPM_TIMEOUTS (120000) // 2 miutes
 
@@ -103,7 +103,7 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
 		return rc;
 	}
     vti->status |= TPM_STS_VALID;
-    printk(KERN_INFO "virtio_tpm: success read message\n");
+    //printk(KERN_INFO "virtio_tpm: success read message\n");
 
     return 0;
 }
@@ -140,20 +140,19 @@ static int virtio_tpm_recv(struct tpm_chip *chip, u8 *buf, size_t buflen)
         printk(KERN_ERR "virtio_tpm_recv buflen is too small");
     }
     
-    out = (struct tpm_header *)buf;
-    printk(KERN_INFO "tpm message- tag %04x",out->tag);
+    out = (struct tpm_header *)vti->response;
+    // printk(KERN_INFO "tpm message- tag %02x",be32_to_cpu(out->tag));
 
-    printk(KERN_INFO "tpm message- len %08x",out->length);
-    printk(KERN_INFO "tpm message- len %08x",out->return_code);
-    memcpy(buf,vti->response, out->length);
-    vti->status |= TPM_STS_VALID;
-
-
-
-
-
+    // printk(KERN_INFO "tpm message- len %04x",be32_to_cpu(out->length));
+    // printk(KERN_INFO "tpm message- len %04x",be32_to_cpu(out->return_code));
     
-    return 0;
+    memcpy(buf,vti->response, be32_to_cpu(out->length));
+    vti->status |= TPM_STS_VALID;
+    // printk(KERN_INFO "First 20 bytes of buf:");
+    // for (int i = 0; i < 20 && i < buflen; i++) {
+    //     printk(KERN_INFO " %02x", buf[i]);
+    // }
+    return be32_to_cpu(out->length);
 }
 
 
@@ -249,21 +248,17 @@ static void virtio_tpm_recv_cb(struct virtqueue *vq)
         /* process the received data */
         // Process TPM commands and responses
         // You need to implement the actual TPM command processing here
-        printk(KERN_INFO "---------------------------------------------------");
-        printk(KERN_INFO "response len is %d",len);
-
         vti->response_len = len;
-        for (size_t i = 0; i < len; i++) {
-            printk(KERN_INFO "my_module: buf[%zu] = 0x%X\n", i,vti->response[i]);
-        }
-        printk(KERN_INFO "---------------------------------------------------");
+        // for (size_t i = 0; i < len; i++) {
+        //     printk(KERN_INFO "my_module: buf[%zu] = 0x%X\n", i,vti->response[i]);
+        // }
         // for (size_t i = 0; i < sizeof(numss); i++) {
         //     printk(KERN_INFO "my_module: numss[%zu] = 0x%X\n", i, numss[i]);
         // }
     }
 
     complete(&vti->cmd_done);
-    printk(KERN_INFO "virtio_tpm recv handle");
+    //printk(KERN_INFO "virtio_tpm recv handle");
 }
 
 
@@ -285,7 +280,23 @@ static const struct tpm_class_ops virtio_tpm = {
 
 
 
+static int tpm2_startup(struct tpm_chip *chip)
+{
+	struct tpm_buf buf;
+	int rc;
 
+	dev_info(&chip->dev, "starting up the TPM manually\n");
+
+	rc = tpm_buf_init(&buf, TPM2_ST_NO_SESSIONS, TPM2_CC_STARTUP);
+	if (rc < 0)
+		return rc;
+
+	tpm_buf_append_u16(&buf, TPM2_SU_CLEAR);
+	rc = tpm_transmit_cmd(chip, &buf, 0, "attempting to start the TPM");
+	tpm_buf_destroy(&buf);
+
+	return rc;
+}
 
 
 
@@ -293,20 +304,41 @@ static const struct tpm_class_ops virtio_tpm = {
 static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_info *vti){
     struct device dev = vdev->dev;
     struct tpm_chip *chip;
+ //   struct tpm_digest *dig;
     int rc;
 
     vti->status = TPM_STS_DATA_AVAIL;
     chip =   tpmm_chip_alloc(&dev,&virtio_tpm);
+    chip->flags |= TPM_CHIP_FLAG_TPM2;
     dev_set_drvdata(&chip->dev,vti);
 
 
+    // dig = kzalloc(sizeof(struct tpm_digest),GFP_ATOMIC);
+    // dig->alg_id = 2;
+    // dig->digest[0] = 0x00; dig->digest[1] = 0x01; dig->digest[2] = 0x02; dig->digest[3] = 0x03;
+
+    
 
     //TODO : acpi support
+    
+    rc = tpm2_startup(chip);
+    if(rc)
+        printk(KERN_INFO "virtio_tpm : unable startup %d", rc);
+
 
     rc = tpm2_probe(chip);
- 
- 
-                        
+    if (rc)
+        printk(KERN_INFO "virtio_tpm : probe failure %d" , rc);
+
+    rc = tpm_chip_register(chip);
+    if (rc)
+        printk(KERN_INFO "virtio_tpm : register failure %d " , rc);
+
+    // rc = tpm_pcr_extend(chip , 10, dig);
+    // if(rc)
+    //     printk(KERN_INFO "virtio_tpm : pcr extend failue %d", rc);
+    printk(KERN_INFO "virtio_tpm : virtio_tpm_core_init successful %d", rc);
+
     return 0;
 }
 
