@@ -3,12 +3,23 @@
 #include <linux/virtio_config.h>
 #include <linux/module.h>
 #include <linux/tpm.h>
+#include <linux/crypto.h>
+#include <crypto/algapi.h>
+#include <crypto/skcipher.h>
+#include <crypto/internal/cipher.h>
 
 #include "tpm.h"
 
+
+#include <linux/printk.h>
+#include <linux/string.h>
+#include <linux/slab.h>
+
+
+
 #define VIRTIO_ID_TPM 41
 
-#define TPM_RESPONSE_LEN 512
+#define TPM_RESPONSE_LEN 2048
 
 #define VIRTIO_TPM_TIMEOUTS (120000) // 2 miutes
 
@@ -55,6 +66,78 @@ struct virtio_tpm_info{
 };
 
 
+
+////crypto
+#define AES_KEY_SIZE 32 // 256 bits
+#define FIXED_OUTPUT_SIZE TPM_RESPONSE_LEN // 512 bytes
+#define AES_BLOCK_SIZE 16
+static struct crypto_cipher *tfm;
+
+
+static int  aes_encrypt_init(void)
+{
+    static const u8 key[AES_KEY_SIZE] = {
+        // 这里填入你的AES密钥
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f
+    };
+
+        tfm = crypto_alloc_cipher("aes", 0, CRYPTO_ALG_ASYNC);
+    if (IS_ERR(tfm)) {
+        printk(KERN_ERR "Failed to allocate tfm\n");
+        return PTR_ERR(tfm);
+    }
+
+    if (crypto_cipher_setkey(tfm, key, AES_KEY_SIZE)) {
+        printk(KERN_ERR "Failed to set key\n");
+        crypto_free_cipher(tfm);
+        return -EINVAL;
+    }
+
+
+    return 0;
+}
+
+static int padding(u8 *input, size_t input_len, u8 *output,size_t len_send) {
+    if (input_len > len_send) {
+        // 如果输入长度超过512字节，返回错误
+        return -1;
+    }
+    // 将输入数据复制到输出数组中
+    memcpy(output, input, input_len);
+    // 如果输入长度小于512字节，将输出数组剩余部分填充为零
+    if (input_len < len_send) {
+        memset(output + input_len, 0, len_send - input_len);
+    }
+    return 0;
+}
+
+
+
+static void aes_encrypt(u8 *plaintext,size_t len_send)
+{
+
+    size_t plaintext_len =  len_send;
+    //printk(KERN_INFO "virtio_tpm: start aes_encrypt:%px ; %px\n",tfm,plaintext);
+    for (size_t offset = 0; offset < plaintext_len; offset += AES_BLOCK_SIZE) {
+        crypto_cipher_encrypt_one(tfm, plaintext + offset, plaintext + offset);
+    }
+    return ;
+}
+
+static void aes_decrypt(u8 *ciphertext,size_t len_recv)
+{
+    
+    size_t ciphertext_len = len_recv;
+    //printk(KERN_INFO "virtio_tpm: start aes_decrypt:%p ; %p\n",tfm,ciphertext);
+    for (size_t offset = 0; offset < ciphertext_len; offset += AES_BLOCK_SIZE) {
+        crypto_cipher_decrypt_one(tfm, ciphertext + offset, ciphertext + offset);
+    }
+    return ;
+}
+
 /* 发送命令的函数 */
 static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
 {
@@ -62,26 +145,36 @@ static int send_command(struct virtio_tpm_info *vti, u8  *str1,size_t len)
     //struct virtio_tpm_info *vi= vdev->priv;
     struct scatterlist sg1,sg2,*sgs[2]; // 
     char *request_buffer;
-    unsigned int request_len= len;
+    size_t len_send;
+    //unsigned int request_len= len;
     int rc;
 
     /* Allocate request_buffer for the strings */
-    request_buffer = kmalloc(request_len, GFP_ATOMIC);
-    //request_buffer[1] = kmalloc(request_len[1], GFP_ATOMIC);
-    if (!request_buffer ) {
-        kfree(request_buffer);
-        return ENODEV;
-    }
-
     vti->status &= ~TPM_STS_VALID;
     vti->response_len =  TPM_RESPONSE_LEN;
     init_completion(&vti->cmd_done);
+    len_send = ((len/AES_BLOCK_SIZE)+1) * AES_BLOCK_SIZE;
+    request_buffer = kmalloc(len_send, GFP_ATOMIC);
+        if (!request_buffer ) {
+        kfree(request_buffer);
+        return ENODEV;
+    }
+    rc = padding(str1,len,request_buffer,len_send);
+    if(rc) 
+        printk(KERN_INFO "virtio_tpm : padding unsuccessful ");
+
+    aes_encrypt(request_buffer,len_send);
+
+    //printk(KERN_INFO "virtio_tpm: After encryption:\n");
+    //print_hex_dump(KERN_INFO, "", DUMP_PREFIX_OFFSET, 16, 1, request_buffer, len_send, 1);
+
+    //request_buffer[1] = kmalloc(request_len[1], GFP_ATOMIC);
     /* Copy strings to the request_buffer */
-    memcpy(request_buffer, str1, request_len);
+    //memcpy(request_buffer, str1, request_len);
     //memcpy(request_buffer[1], str2, strlen(str2));
 
     /* Initialize scatterlist entries */
-    sg_init_one(&sg1, request_buffer, request_len);
+    sg_init_one(&sg1, request_buffer, len_send);
     sg_init_one(&sg2, vti->response, vti->response_len);
     
     sgs[0] = &sg1;
@@ -139,6 +232,13 @@ static int virtio_tpm_recv(struct tpm_chip *chip, u8 *buf, size_t buflen)
     if (buflen < vti->response_len){
         printk(KERN_ERR "virtio_tpm_recv buflen is too small");
     }
+
+
+    aes_decrypt(vti->response,vti->response_len);
+    // if(rc<=0)
+    //     printk(KERN_INFO "virtio_tpm : aes_decrypt unsuccessful ");
+    //printk(KERN_INFO "virtio_tpm: After decryption:\n");
+    //print_hex_dump(KERN_INFO, "", DUMP_PREFIX_OFFSET, 16, 1, vti->response, vti->response_len, 1);
     
     out = (struct tpm_header *)vti->response;
     // printk(KERN_INFO "tpm message- tag %02x",be32_to_cpu(out->tag));
@@ -249,6 +349,7 @@ static void virtio_tpm_recv_cb(struct virtqueue *vq)
         // Process TPM commands and responses
         // You need to implement the actual TPM command processing here
         vti->response_len = len;
+        // printk(KERN_INFO "============================================len is :%d\n",len);
         // for (size_t i = 0; i < len; i++) {
         //     printk(KERN_INFO "my_module: buf[%zu] = 0x%X\n", i,vti->response[i]);
         // }
@@ -317,7 +418,9 @@ static int virtio_tpm_core_init(struct virtio_device *vdev, struct virtio_tpm_in
     // dig->alg_id = 2;
     // dig->digest[0] = 0x00; dig->digest[1] = 0x01; dig->digest[2] = 0x02; dig->digest[3] = 0x03;
 
-    
+    rc = aes_encrypt_init();
+    if(rc)
+        printk(KERN_INFO "virtio_tpm : unable aes_encrypt_init %d", rc);
 
     //TODO : acpi support
     

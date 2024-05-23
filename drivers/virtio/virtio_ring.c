@@ -500,11 +500,9 @@ static inline int virtqueue_add_split(struct virtqueue *_vq,
 	head = vq->free_head;
 
 	if (virtqueue_use_indirect(vq, total_sg)){
-		printk(KERN_INFO "virtio-tpm: use indirect !!! \n");
 		desc = alloc_indirect_split(_vq, total_sg, gfp);
 	}
 	else {
-		printk(KERN_INFO "virtio-tpm: not use indirect !!! \n");
 		desc = NULL;
 		WARN_ON_ONCE(total_sg > vq->split.vring.num && !vq->indirect);
 	}
